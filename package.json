@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Shared long-term memory (SQLite + FTS5) for agents working in ~/Playground",
+  "description": "Shared long-term memory (SQLite + FTS5) for coding agents",
   "bin": {
     "mind": "bin/mind"
   },

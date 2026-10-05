@@ -12,7 +12,7 @@ const fail = (e: unknown) => ({ ...text(`Error: ${e instanceof Error ? e.message
 const projectArg = z
   .string()
   .optional()
-  .describe('Project name (a folder in ~/Playground, e.g. "kolla") or "global". Defaults to the current project.');
+  .describe('Project name (a top-level folder under a project root, e.g. "kolla") or "global". Defaults to the current project.');
 
 export async function startMcpServer() {
   const store = new MemoryStore(openDb());
@@ -38,7 +38,7 @@ export async function startMcpServer() {
 
   tool(
     "recall",
-    `Search the shared long-term memory (all agents, all ~/Playground projects) by keywords. Use it before non-trivial work, when something seems to have history ("why is X done this way?"), or when hitting an error that may be a known gotcha. Results from the current project${cwdProject ? ` (${cwdProject})` : ""} rank higher. Use several distinct keywords; a trailing * does prefix matching.`,
+    `Search the shared long-term memory (all agents, all projects) by keywords. Use it before non-trivial work, when something seems to have history ("why is X done this way?"), or when hitting an error that may be a known gotcha. Results from the current project${cwdProject ? ` (${cwdProject})` : ""} rank higher. Use several distinct keywords; a trailing * does prefix matching.`,
     {
       query: z.string().min(1).describe("Keywords, e.g. 'docker deploy ec2 env'"),
       project: z.string().optional().describe('Restrict to this project + global. Omit to search all projects; use "global" for global-only.'),

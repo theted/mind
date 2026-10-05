@@ -4,11 +4,11 @@ import { createInterface } from "node:readline";
 import { text } from "node:stream/consumers";
 import { parseArgs } from "node:util";
 import { defaultDbPath, openDb } from "./core/db.ts";
-import { resolveProject } from "./core/project.ts";
+import { projectRoots, resolveProject } from "./core/project.ts";
 import { type Kind, MemoryStore, type MemoryRow, MindError } from "./core/store.ts";
 import { contextMarkdown, memoryBlock, memoryLine } from "./format.ts";
 
-const HELP = `mind — shared long-term memory for agents in ~/Playground
+const HELP = `mind — shared long-term memory for coding agents
 
 Usage: mind <command> [options]          (add --json for machine-readable output)
 
@@ -27,7 +27,9 @@ Usage: mind <command> [options]          (add --json for machine-readable output
   mcp                    Run the MCP server on stdio
 
 Kinds: fact, decision, preference, gotcha, howto, episode
-Project defaults to the cwd's folder under ~/Playground. DB: ${defaultDbPath()}`;
+Project defaults to the cwd's top-level folder under a project root, else its git repo name.
+Roots (MIND_ROOT): ${projectRoots().join(", ") || "none"}
+DB: ${defaultDbPath()}`;
 
 const { values: o, positionals } = parseArgs({
   allowPositionals: true,

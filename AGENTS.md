@@ -1,6 +1,6 @@
 # AGENTS.md — mind
 
-Shared memory service for agents in `~/Playground`. See `README.md` for the model and CLI.
+Shared memory service for coding agents (projects live under the `MIND_ROOT` directories). See `README.md` for the model and CLI.
 
 - **Runtime:** Node ≥ 24 from the system package (`pacman -S nodejs npm`), with no mise and no build step. Node runs the `.ts` sources directly through type stripping, and the database is the built-in `node:sqlite`. `bin/mind` is the entry point.
 - **Type stripping:** only erasable TypeScript is allowed: no enums, namespaces or constructor parameter properties. Relative imports need the `.ts` extension, and type-only imports need `import type`. `tsc` enforces all of this (`erasableSyntaxOnly`, `verbatimModuleSyntax`).

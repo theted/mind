@@ -32,7 +32,7 @@ export function contextMarkdown(store: MemoryStore, project: string | null): str
   const { project: proj, global } = store.context(project);
   const out = [
     `# Shared memory (mind)${project ? ` — project: ${project}` : ""}`,
-    `Long-term memory shared by all agents in ~/Playground. Search it with the \`mind\` MCP tool \`recall\` (or \`mind recall "<query>"\`) before non-trivial work; save durable, non-obvious learnings with \`remember\`.`,
+    `Long-term memory shared by all agents across projects. Search it with the \`mind\` MCP tool \`recall\` (or \`mind recall "<query>"\`) before non-trivial work; save durable, non-obvious learnings with \`remember\`.`,
   ];
   if (proj.length) out.push("", `## ${project}`, ...proj.map((m) => memoryLine(m)));
   if (global.length) out.push("", "## global", ...global.map((m) => memoryLine(m)));
