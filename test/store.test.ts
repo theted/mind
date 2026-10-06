@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { delimiter, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, test } from "node:test";
 import { openDb } from "../src/core/db.ts";
-import { resolveProject } from "../src/core/project.ts";
+import { projectRoots, resolveProject } from "../src/core/project.ts";
 import { MemoryStore, toFtsQuery } from "../src/core/store.ts";
 import { migrations } from "../src/core/schema.ts";
 
@@ -147,19 +147,52 @@ describe("context, export/import", () => {
 });
 
 describe("project resolution", () => {
+  const withRoot = (value: string, fn: () => void) => {
+    const prev = process.env.MIND_ROOT;
+    process.env.MIND_ROOT = value;
+    try {
+      fn();
+    } finally {
+      if (prev === undefined) delete process.env.MIND_ROOT;
+      else process.env.MIND_ROOT = prev;
+    }
+  };
+
   test("maps nested paths, worktrees and the root", () => {
     const root = join(dir, "Playground");
     mkdirSync(join(root, "kolla/client/src"), { recursive: true });
     mkdirSync(join(root, "kolla-feature"), { recursive: true });
     writeFileSync(join(root, "kolla-feature/.git"), `gitdir: ${root}/kolla/.git/worktrees/kolla-feature\n`);
-    process.env.MIND_ROOT = root;
-    try {
+    withRoot(root, () => {
       assert.equal(resolveProject(join(root, "kolla/client/src")), "kolla");
       assert.equal(resolveProject(join(root, "kolla-feature")), "kolla");
       assert.equal(resolveProject(root), null);
-    } finally {
-      delete process.env.MIND_ROOT;
-    }
+    });
+  });
+
+  test("supports several roots, preferring the most specific", () => {
+    const [play, work] = [join(dir, "Playground"), join(dir, "work")];
+    const nested = join(work, "clients");
+    for (const d of [join(play, "kolla"), join(work, "api/src"), join(nested, "acme/web")]) mkdirSync(d, { recursive: true });
+    withRoot([play, work, nested].join(delimiter), () => {
+      assert.equal(resolveProject(join(play, "kolla")), "kolla");
+      assert.equal(resolveProject(join(work, "api/src")), "api");
+      assert.equal(resolveProject(join(nested, "acme/web")), "acme");
+      assert.equal(resolveProject(nested), null);
+    });
+  });
+
+  test("parses MIND_ROOT like PATH", () => {
+    withRoot(["~/code", "", " /srv/repos ", "~/code"].join(delimiter), () => {
+      assert.deepEqual(projectRoots(), [join(homedir(), "code"), resolve("/srv/repos")]);
+    });
+    withRoot("", () => assert.deepEqual(projectRoots(), []));
+  });
+
+  test("outside every root, a non-git directory is global", () => {
+    const loose = join(dir, "loose");
+    mkdirSync(loose);
+    withRoot("", () => assert.equal(resolveProject(loose), null));
   });
 });
 
