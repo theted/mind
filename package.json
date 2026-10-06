@@ -7,9 +7,12 @@
   "bin": {
     "mind": "bin/mind"
   },
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
-    "test": "bun test",
-    "mcp": "bun src/cli.ts mcp",
+    "test": "node --test test/*.test.ts",
+    "mcp": "node src/cli.ts mcp",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -17,7 +20,7 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
-    "@types/bun": "^1.4.2",
+    "@types/node": "^24",
     "typescript": "^7.0.2"
   }
 }

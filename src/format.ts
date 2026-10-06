@@ -1,4 +1,4 @@
-import type { Memory, MemoryStore } from "./core/store";
+import type { Memory, MemoryStore } from "./core/store.ts";
 
 const oneLine = (s: string, max: number) => {
   const t = s.replace(/\s+/g, " ").trim();

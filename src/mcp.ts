@@ -1,10 +1,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { openDb } from "./core/db";
-import { resolveProject } from "./core/project";
-import { KINDS, MemoryStore } from "./core/store";
-import { memoryBlock, memoryLine } from "./format";
+import { openDb } from "./core/db.ts";
+import { resolveProject } from "./core/project.ts";
+import { KINDS, MemoryStore } from "./core/store.ts";
+import { memoryBlock, memoryLine } from "./format.ts";
 
 const text = (t: string) => ({ content: [{ type: "text" as const, text: t }] });
 const fail = (e: unknown) => ({ ...text(`Error: ${e instanceof Error ? e.message : String(e)}`), isError: true });

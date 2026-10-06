@@ -2,7 +2,7 @@
 
 Shared long-term memory for every agent working in `~/Playground`: Claude Code, Codex, and anything else that speaks MCP or can run a shell command.
 
-It is a single SQLite database (WAL + FTS5). One core (`src/core/`) is exposed two ways:
+It is a single SQLite database (WAL + FTS5) accessed through Node's built-in `node:sqlite`. One core (`src/core/`) is exposed two ways:
 
 - **MCP server** (`mind mcp`): tools `recall`, `remember`, `get`, `update`, `forget`, `list`, `list_projects`
 - **CLI** (`mind <cmd>`): the same operations, plus `context`, `export`/`import` and `stats`
@@ -53,7 +53,7 @@ claude mcp add --scope user mind -- ~/Playground/mind/bin/mind mcp      # Claude
 - **Usage guidance for agents:** `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`.
 - **Other MCP clients** (gemini, opencode, cursor-agent, …): register the stdio command `~/Playground/mind/bin/mind mcp`.
 
-`bin/mind` pins Bun 1.4.2 through mise, because this machine has no global bun default.
+`bin/mind` runs `node src/cli.ts`: Node ≥ 24 executes the TypeScript directly (type stripping), so there is no build step. Node comes from the system package (`pacman -S nodejs npm`), so MCP clients and hooks that start without a shell profile still find it.
 
 ## Environment
 
@@ -67,8 +67,9 @@ claude mcp add --scope user mind -- ~/Playground/mind/bin/mind mcp      # Claude
 ## Development
 
 ```sh
-mise x bun@1.4.2 -- bun test        # store, FTS sync, dedupe, supersede, import, project resolution, concurrent writers
-mise x bun@1.4.2 -- bun x tsc --noEmit
+npm install
+npm test              # store, FTS sync, dedupe, supersede, rollback, import, project resolution, concurrent writers
+npm run typecheck
 npx @modelcontextprotocol/inspector bin/mind mcp
 ```
 

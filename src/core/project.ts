@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -24,9 +25,9 @@ export function resolveProject(cwd = process.cwd()): string | null {
     const seg = rel.split(sep)[0]!;
     return worktreeMain(join(root, seg)) ?? seg;
   }
-  const r = Bun.spawnSync(["git", "rev-parse", "--show-toplevel"], { cwd: abs, stderr: "ignore" });
-  if (r.exitCode !== 0) return null;
-  const top = r.stdout.toString().trim();
+  const r = spawnSync("git", ["rev-parse", "--show-toplevel"], { cwd: abs, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  if (r.status !== 0) return null;
+  const top = r.stdout.trim();
   return worktreeMain(top) ?? basename(top);
 }
 

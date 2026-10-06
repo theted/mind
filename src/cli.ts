@@ -1,11 +1,12 @@
-#!/usr/bin/env bun
-import { createReadStream } from "node:fs";
+#!/usr/bin/env node
+import { createReadStream, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
+import { text } from "node:stream/consumers";
 import { parseArgs } from "node:util";
-import { defaultDbPath, openDb } from "./core/db";
-import { resolveProject } from "./core/project";
-import { type Kind, MemoryStore, type MemoryRow, MindError } from "./core/store";
-import { contextMarkdown, memoryBlock, memoryLine } from "./format";
+import { defaultDbPath, openDb } from "./core/db.ts";
+import { resolveProject } from "./core/project.ts";
+import { type Kind, MemoryStore, type MemoryRow, MindError } from "./core/store.ts";
+import { contextMarkdown, memoryBlock, memoryLine } from "./format.ts";
 
 const HELP = `mind — shared long-term memory for agents in ~/Playground
 
@@ -59,11 +60,11 @@ const int = (s: string | undefined, name: string) => {
 };
 const ids = (xs: string[]) => xs.map((x) => int(x.replace(/^#/, ""), "id")!);
 const print = (human: string, data: unknown) => console.log(o.json ? JSON.stringify(data, null, 2) : human);
-const readBody = async (b?: string) => (b === "-" ? (await Bun.stdin.text()).trim() : b);
+const readBody = async (b?: string) => (b === "-" ? (await text(process.stdin)).trim() : b);
 
 async function main() {
   if (o.help || !cmd || cmd === "help") return console.log(HELP);
-  if (cmd === "mcp") return (await import("./mcp")).startMcpServer();
+  if (cmd === "mcp") return (await import("./mcp.ts")).startMcpServer();
 
   const store = new MemoryStore(openDb());
   const cwdProject = () => resolveProject(o.cwd ?? process.cwd());
@@ -141,7 +142,7 @@ async function main() {
     case "export": {
       const lines = [...store.exportRows()].map((r) => JSON.stringify(r)).join("\n") + "\n";
       if (args[0]) {
-        await Bun.write(args[0], lines);
+        writeFileSync(args[0], lines);
         console.error(`Exported to ${args[0]}`);
       } else process.stdout.write(lines);
       return;

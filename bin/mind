@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
-# Entry point for humans, hooks and MCP clients. Resolves symlinks so it can be linked into PATH,
-# and pins Bun via mise because there's no global bun default on this machine.
+# Entry point for humans, hooks and MCP clients. Resolves symlinks so it can be linked into PATH.
+# Node runs the TypeScript sources directly (type stripping), so there is no build step.
 set -euo pipefail
 DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
-if command -v mise >/dev/null 2>&1; then
-  exec mise exec bun@1.4.2 -- bun "$DIR/src/cli.ts" "$@"
-fi
-exec bun "$DIR/src/cli.ts" "$@"
+exec node "$DIR/src/cli.ts" "$@"
