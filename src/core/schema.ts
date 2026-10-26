@@ -42,4 +42,14 @@ export const migrations: string[] = [
     INSERT INTO memories_fts(rowid, title, body, tags) VALUES (new.id, new.title, new.body, new.tags);
   END;
   `,
+  // Semantic index: one embedding per memory, derived data (rebuilt by `mind reindex`, never exported).
+  // A vector is current while its model matches the configured one and its content_hash matches the memory's.
+  `
+  CREATE TABLE memory_vectors (
+    memory_id    INTEGER PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+    model        TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    vector       BLOB NOT NULL  -- float32 little-endian, unit length
+  );
+  `,
 ];

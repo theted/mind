@@ -4,15 +4,18 @@ import { createInterface } from "node:readline";
 import { text } from "node:stream/consumers";
 import { parseArgs } from "node:util";
 import { defaultDbPath, openDb } from "./core/db.ts";
+import { DEFAULT_MODEL } from "./core/embed.ts";
+import { describeError, Mind } from "./core/mind.ts";
 import { projectRoots, resolveProject } from "./core/project.ts";
-import { type Kind, MemoryStore, type MemoryRow, MindError } from "./core/store.ts";
-import { contextMarkdown, memoryBlock, memoryLine } from "./format.ts";
+import { MemoryStore } from "./core/store.ts";
+import { type Kind, type MemoryRow, MindError } from "./core/types.ts";
+import { contextMarkdown, memoryBlock, memoryLine, memoryTable, projectsTable, statsTable } from "./format.ts";
 
 const HELP = `mind — shared long-term memory for coding agents
 
 Usage: mind <command> [options]          (add --json for machine-readable output)
 
-  recall <query...>      Search memories    [-p project|global] [-k kind] [-n limit] [--superseded]
+  recall <query...>      Search by meaning + keywords  [-p project|global] [-k kind] [-n limit] [--superseded]
   remember <title>       Save a memory      -k kind [-b body | -b - (stdin)] [-t tags] [-p project|global]
                                             [-i 1-5] [-f file,...] [--supersedes id,...]
   get <id...>            Show full memories
@@ -23,13 +26,18 @@ Usage: mind <command> [options]          (add --json for machine-readable output
   context                Session-start digest (for hooks)  [--cwd dir]
   export [file]          JSONL dump (stdout by default), includes superseded/deleted
   import <file>          Load a JSONL dump (duplicates skipped)
-  stats                  Counts
+  stats                  Counts and semantic index coverage
+  reindex                Embed memories missing a current vector  [--force: re-embed all]
   mcp                    Run the MCP server on stdio
+  serve                  Run the MCP server over HTTP at /mcp     [--port 7077] [--host 127.0.0.1]
 
 Kinds: fact, decision, preference, gotcha, howto, episode
 Project defaults to the cwd's top-level folder under a project root, else its git repo name.
+Lists print as tables at a terminal and as markdown lines when piped.
+
 Roots (MIND_ROOT): ${projectRoots().join(", ") || "none"}
-DB: ${defaultDbPath()}`;
+DB: ${defaultDbPath()}
+Embeddings (MIND_EMBED_URL): ${process.env.MIND_EMBED_URL ? `${process.env.MIND_EMBED_URL}, model ${process.env.MIND_EMBED_MODEL || DEFAULT_MODEL}` : "off, keyword search only"}`;
 
 const { values: o, positionals } = parseArgs({
   allowPositionals: true,
@@ -49,6 +57,9 @@ const { values: o, positionals } = parseArgs({
     hard: { type: "boolean" },
     cwd: { type: "string" },
     source: { type: "string" },
+    force: { type: "boolean" },
+    port: { type: "string" },
+    host: { type: "string" },
   },
 });
 
@@ -62,20 +73,40 @@ const int = (s: string | undefined, name: string) => {
 };
 const ids = (xs: string[]) => xs.map((x) => int(x.replace(/^#/, ""), "id")!);
 const print = (human: string, data: unknown) => console.log(o.json ? JSON.stringify(data, null, 2) : human);
+// Tables for a person at a terminal; markdown lines (compact, what agents read best) when piped.
+const show = (table: () => string, plain: () => string, data: unknown) =>
+  print(o.json ? "" : process.stdout.isTTY ? table() : plain(), data);
 const readBody = async (b?: string) => (b === "-" ? (await text(process.stdin)).trim() : b);
 
 async function main() {
   if (o.help || !cmd || cmd === "help") return console.log(HELP);
   if (cmd === "mcp") return (await import("./mcp.ts")).startMcpServer();
+  if (cmd === "serve") {
+    const { startHttpServer } = await import("./serve.ts");
+    const http = await startHttpServer({
+      port: int(o.port ?? process.env.MIND_PORT, "port") ?? 7077,
+      host: o.host ?? process.env.MIND_HOST ?? "127.0.0.1",
+      token: process.env.MIND_TOKEN || undefined,
+      allowedHosts: list(process.env.MIND_ALLOWED_HOSTS),
+    });
+    // As a container's PID 1, Node gets no default SIGTERM handling; without this `docker stop` waits 10s to kill it.
+    const stop = () => {
+      http.closeAllConnections();
+      http.close(() => process.exit(0));
+    };
+    process.once("SIGTERM", stop).once("SIGINT", stop);
+    return;
+  }
 
   const store = new MemoryStore(openDb());
+  const mind = new Mind(store);
   const cwdProject = () => resolveProject(o.cwd ?? process.cwd());
   const kind = o.kind as Kind | undefined;
 
   switch (cmd) {
     case "recall": {
       if (!args.length) throw new MindError("recall needs a query");
-      const res = store.recall({
+      const { memories, semantic } = await mind.recall({
         query: args.join(" "),
         project: o.project,
         boostProject: cwdProject(),
@@ -83,12 +114,14 @@ async function main() {
         limit: int(o.limit, "limit"),
         includeSuperseded: o.superseded,
       });
-      return print(res.length ? res.map((m) => memoryLine(m)).join("\n") : "No matching memories.", res);
+      if (mind.embedder && !semantic) console.error(`mind: semantic search unavailable, keyword matches only (${mind.error})`);
+      if (!memories.length) return print("No matching memories.", memories);
+      return show(() => memoryTable(memories, { detail: "body" }), () => memories.map((m) => memoryLine(m)).join("\n"), memories);
     }
     case "remember": {
       const title = args.join(" ");
       if (!kind) throw new MindError("remember needs -k <kind>");
-      const { memory, duplicate } = store.remember({
+      const { memory, duplicate, similar } = await mind.remember({
         kind,
         title,
         body: await readBody(o.body),
@@ -99,7 +132,9 @@ async function main() {
         supersedes: o.supersedes ? ids(list(o.supersedes)!) : undefined,
         source: o.source ?? process.env.MIND_SOURCE ?? "cli",
       });
-      return print(duplicate ? `Already stored as #${memory.id}` : `Saved\n${memoryLine(memory)}`, { duplicate, memory });
+      const lines = duplicate ? [`Already stored as #${memory.id}`] : ["Saved", memoryLine(memory)];
+      if (similar.length) lines.push("", "Similar existing memories (supersede or forget if redundant):", ...similar.map((m) => `${memoryLine(m)} (similarity ${m.score})`));
+      return print(lines.join("\n"), { duplicate, memory, similar });
     }
     case "get": {
       const res = ids(args).map((id) => store.get(id));
@@ -109,7 +144,7 @@ async function main() {
     case "update": {
       const [id] = ids(args);
       if (id === undefined) throw new MindError("update needs an id");
-      const m = store.update(id, {
+      const m = await mind.update(id, {
         title: o.title,
         body: await readBody(o.body),
         kind,
@@ -129,18 +164,36 @@ async function main() {
     }
     case "list": {
       const res = store.list({ project: o.project, kind, limit: int(o.limit, "limit"), includeSuperseded: o.superseded });
-      return print(res.length ? res.map((m) => memoryLine(m)).join("\n") : "No memories.", res);
+      if (!res.length) return print("No memories.", res);
+      return show(() => memoryTable(res), () => res.map((m) => memoryLine(m)).join("\n"), res);
     }
     case "projects": {
       const res = store.listProjects();
-      return print(res.map((p) => `${p.project.padEnd(28)} ${String(p.count).padStart(4)}  ${p.last_updated.slice(0, 10)}`).join("\n") || "No memories.", res);
+      if (!res.length) return print("No memories.", res);
+      return show(
+        () => projectsTable(res),
+        () => res.map((p) => `${p.project.padEnd(28)} ${String(p.count).padStart(4)}  ${p.last_updated.slice(0, 10)}`).join("\n"),
+        res,
+      );
     }
     case "context": {
       const project = o.project ?? cwdProject();
       return print(contextMarkdown(store, project), store.context(project));
     }
-    case "stats":
-      return print(JSON.stringify(store.stats(), null, 2), store.stats());
+    case "stats": {
+      const stats = { ...store.stats(), semantic: mind.status() };
+      return show(() => statsTable(stats, stats.semantic), () => JSON.stringify(stats, null, 2), stats);
+    }
+    case "reindex": {
+      if (!mind.embedder) throw new MindError("no embedder configured: set MIND_EMBED_URL (see README)");
+      const progress = (n: number) => process.stderr.isTTY && process.stderr.write(`\rEmbedded ${n}…`);
+      const n = await mind.sync({ force: o.force, onProgress: progress }).catch((e: unknown) => {
+        throw new MindError(`embedding failed: ${describeError(e)}`);
+      });
+      if (process.stderr.isTTY) process.stderr.write("\r\x1b[K");
+      const { embedded, total } = mind.status()!;
+      return print(`Embedded ${n} memories with ${mind.embedder.model} (${embedded}/${total} indexed)`, { embedded: n, indexed: embedded, total });
+    }
     case "export": {
       const lines = [...store.exportRows()].map((r) => JSON.stringify(r)).join("\n") + "\n";
       if (args[0]) {

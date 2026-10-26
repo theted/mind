@@ -43,6 +43,15 @@ describe("remember / recall", () => {
     assert.equal(store.recall({ query: "front*" }).length, 1);
   });
 
+  test("ignores stop words unless the query has nothing else", () => {
+    store.remember({ kind: "fact", title: "Prefer arrow functions for callbacks" });
+    const deploy = store.remember({ kind: "howto", title: "Deploy with the release script" }).memory;
+    assert.deepEqual(store.recall({ query: "how do we deploy" }).map((m) => m.id), [deploy.id]);
+    assert.deepEqual(store.recall({ query: "recipe for banana bread" }), []);
+    assert.equal(toFtsQuery("the"), '"the"');
+    assert.equal(toFtsQuery("how* to"), '"how"*');
+  });
+
   test("hostile query syntax does not throw", () => {
     store.remember({ kind: "fact", title: "quote test" });
     for (const q of [`"unbalanced`, "AND OR NOT", "a:b", "(x", "NEAR(", "*", "-foo"]) assert.doesNotThrow(() => store.recall({ query: q }));
@@ -199,7 +208,7 @@ describe("project resolution", () => {
 describe("concurrency", () => {
   test("parallel writer processes don't hit 'database is locked'", { timeout: 60_000 }, async () => {
     const script = join(import.meta.dirname, "../src/cli.ts");
-    const env = { ...process.env, MIND_DB: dbPath() };
+    const env = { ...process.env, MIND_DB: dbPath(), MIND_EMBED_URL: "" };
     const codes = await Promise.all(
       Array.from(
         { length: 6 },
