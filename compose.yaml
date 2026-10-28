@@ -1,0 +1,48 @@
+# Self-contained mind: the MCP server plus a local embedding model, nothing leaves the machine.
+#
+#   docker compose up -d                  # first start downloads the model (~130 MB) into a volume
+#   claude mcp add --scope user --transport http mind http://localhost:7077/mcp
+#
+# The database is ./data/mind.db, the same file bin/mind uses on the host, so the CLI, hooks and stdio MCP
+# servers keep working alongside the container (Linux only: SQLite WAL needs one kernel for its shared memory).
+# Settings are read from the environment or a .env file next to this one; see README.md.
+
+services:
+  embedder:
+    # Hugging Face Text Embeddings Inference: serves any sentence-transformers model behind an
+    # OpenAI-compatible /v1/embeddings. For a GPU, use a CUDA tag of the same version (see the TEI docs).
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9
+    command: ["--model-id", "${MIND_EMBED_MODEL:-BAAI/bge-small-en-v1.5}", "--port", "80"]
+    volumes:
+      - models:/data
+    ports:
+      - "127.0.0.1:${MIND_EMBED_PORT:-8089}:80" # host-side bin/mind embeds through this
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 120s
+    restart: unless-stopped
+
+  mind:
+    build: .
+    image: mind:latest
+    depends_on:
+      embedder:
+        condition: service_healthy
+    user: "${MIND_UID:-1000}:${MIND_GID:-1000}"
+    environment:
+      MIND_EMBED_URL: http://embedder/v1
+      MIND_EMBED_MODEL: ${MIND_EMBED_MODEL:-BAAI/bge-small-en-v1.5}
+      # Absolute host paths, so X-Mind-Cwd headers and MCP roots map to projects as they do locally.
+      MIND_ROOT: ${MIND_ROOT:-}
+      MIND_TOKEN: ${MIND_TOKEN:-}
+      MIND_ALLOWED_HOSTS: ${MIND_ALLOWED_HOSTS:-}
+    volumes:
+      - ./data:/data
+    ports:
+      - "127.0.0.1:${MIND_PORT:-7077}:7077"
+    restart: unless-stopped
+
+volumes:
+  models:

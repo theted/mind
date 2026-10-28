@@ -1,88 +1,27 @@
 import { createHash } from "node:crypto";
 import type { DatabaseSync, SQLInputValue } from "node:sqlite";
 import { immediate } from "./db.ts";
+import { embeddingText } from "./embed.ts";
 import { normalizeProject } from "./project.ts";
+import { type KeywordHit, rank, type SemanticHit } from "./rank.ts";
+import {
+  KINDS,
+  type Kind,
+  type ListInput,
+  type Memory,
+  MindError,
+  type MemoryRow as Row,
+  type RecallInput,
+  type RememberInput,
+  type SemanticQuery,
+  type UpdateInput,
+} from "./types.ts";
+import { dot, fromBlob, toBlob } from "./vectors.ts";
 
 type Params = Record<string, SQLInputValue>;
 
-export const KINDS = ["fact", "decision", "preference", "gotcha", "howto", "episode"] as const;
-export type Kind = (typeof KINDS)[number];
-
-export interface Memory {
-  id: number;
-  project: string | null;
-  kind: Kind;
-  title: string;
-  body: string;
-  tags: string[];
-  files: string[];
-  source: string | null;
-  importance: number;
-  created_at: string;
-  updated_at: string;
-  last_accessed_at: string | null;
-  access_count: number;
-  superseded_by: number | null;
-  score?: number;
-}
-
-export interface RememberInput {
-  kind: Kind;
-  title: string;
-  body?: string;
-  tags?: string[];
-  files?: string[];
-  project?: string | null;
-  source?: string | null;
-  importance?: number;
-  /** ids of older memories this one replaces */
-  supersedes?: number[];
-}
-
-export type UpdateInput = Partial<Pick<RememberInput, "kind" | "title" | "body" | "tags" | "files" | "project" | "importance">>;
-
-export interface RecallInput {
-  query: string;
-  /** Restrict results to this project + global. Omit to search everything. */
-  project?: string | null;
-  /** Project to rank higher when not restricting (usually the caller's cwd). */
-  boostProject?: string | null;
-  kind?: Kind;
-  limit?: number;
-  includeSuperseded?: boolean;
-}
-
-export interface ListInput {
-  project?: string | null;
-  kind?: Kind;
-  limit?: number;
-  includeSuperseded?: boolean;
-}
-
-// A type alias, not an interface, so node:sqlite's untyped rows (Record<string, SQLOutputValue>) can be cast to it.
-type Row = {
-  id: number;
-  project: string | null;
-  kind: Kind;
-  title: string;
-  body: string;
-  tags: string;
-  files: string;
-  source: string | null;
-  importance: number;
-  content_hash: string;
-  created_at: number;
-  updated_at: number;
-  last_accessed_at: number | null;
-  access_count: number;
-  superseded_by: number | null;
-  deleted_at: number | null;
-};
-
-export class MindError extends Error {}
-
-const DAY_MS = 86_400_000;
-const RECENCY_HALF_LIFE_DAYS = 120;
+/** Candidates pulled from each retriever before re-ranking. */
+const CANDIDATES = 200;
 
 const iso = (ms: number | null) => (ms == null ? null : new Date(ms).toISOString());
 
@@ -122,21 +61,26 @@ function clampImportance(i: number | undefined) {
   return i;
 }
 
+// Function words dropped from keyword queries: OR-joined, "how do we deploy" would otherwise match every memory
+// containing "we". Natural-language questions are what the semantic pass is for.
+const STOP_WORDS = new Set(
+  "a an and are as at be been but by can could did do does for from had has have how i if in into is it its me my no not of on or our should so than that the their them then there these they this those to was we were what when where which who why will with would you your".split(" "),
+);
+
 /**
  * Turn free text into a safe FTS5 query: every token quoted (so operators and
  * punctuation can't break the syntax), OR-joined so partial matches still rank.
- * A trailing `*` on a token keeps prefix matching.
+ * A trailing `*` on a token keeps prefix matching. Stop words are dropped unless
+ * the query has nothing else.
  */
 export function toFtsQuery(text: string): string | null {
   const terms = text
     .split(/\s+/)
-    .map((raw) => {
-      const prefix = raw.endsWith("*");
-      const tok = raw.replace(/["*]/g, "").trim();
-      return tok ? `"${tok}"${prefix ? "*" : ""}` : "";
-    })
-    .filter(Boolean);
-  return terms.length ? terms.join(" OR ") : null;
+    .map((raw) => ({ tok: raw.replace(/["*]/g, "").trim(), prefix: raw.endsWith("*") }))
+    .filter(({ tok }) => tok);
+  const content = terms.filter(({ tok, prefix }) => prefix || !STOP_WORDS.has(tok.toLowerCase()));
+  const use = content.length ? content : terms;
+  return use.length ? use.map(({ tok, prefix }) => `"${tok}"${prefix ? "*" : ""}`).join(" OR ") : null;
 }
 
 export class MemoryStore {
@@ -237,43 +181,141 @@ export class MemoryStore {
     return res.changes > 0;
   }
 
-  recall(input: RecallInput, now = Date.now()): Memory[] {
+  /**
+   * Keyword search (FTS5/BM25), plus a semantic pass when given an embedded query, re-ranked by
+   * project, importance and recency. Both passes apply the same filters.
+   */
+  recall(input: RecallInput, { semantic, now = Date.now() }: { semantic?: SemanticQuery; now?: number } = {}): Memory[] {
     const fts = toFtsQuery(input.query);
-    if (!fts) return [];
-    const limit = input.limit ?? 10;
+    if (!fts && !semantic) return [];
     const restrict = input.project !== undefined;
     const project = normalizeProject(restrict ? input.project : input.boostProject);
     if (input.kind) assertKind(input.kind);
 
-    const where = ["memories_fts MATCH $fts", "m.deleted_at IS NULL"];
+    const where = ["m.deleted_at IS NULL"];
+    const params: Params = {};
     if (!input.includeSuperseded) where.push("m.superseded_by IS NULL");
-    if (input.kind) where.push("m.kind = $kind");
-    if (restrict) where.push(project ? "(m.project = $project OR m.project IS NULL)" : "m.project IS NULL");
+    if (input.kind) {
+      where.push("m.kind = $kind");
+      params.kind = input.kind;
+    }
+    if (restrict) {
+      where.push(project ? "(m.project = $project OR m.project IS NULL)" : "m.project IS NULL");
+      if (project) params.project = project;
+    }
 
-    // Pull a generous candidate set by text relevance, then re-rank with project/importance/recency.
-    const rows = this.db
+    const keyword = fts ? this.keywordHits(fts, where, params) : [];
+    const ranked = rank(keyword, semantic ? this.semanticHits(semantic, where, params) : null, {
+      project,
+      now,
+      limit: input.limit ?? 10,
+    });
+    this.touch(ranked.map((s) => s.row.id), now);
+    return ranked.map((s) => toMemory(s.row, s.score));
+  }
+
+  private keywordHits(fts: string, where: string[], params: Params): KeywordHit[] {
+    return this.db
       .prepare(
         `SELECT m.*, bm25(memories_fts, 4.0, 1.0, 2.0) AS rank
          FROM memories_fts JOIN memories m ON m.id = memories_fts.rowid
-         WHERE ${where.join(" AND ")}
-         ORDER BY rank LIMIT 200`,
+         WHERE memories_fts MATCH $fts AND ${where.join(" AND ")}
+         ORDER BY rank LIMIT ${CANDIDATES}`,
       )
-      .all({ fts, ...(input.kind ? { kind: input.kind } : {}), ...(restrict && project ? { project } : {}) }) as (Row & { rank: number })[];
+      .all({ ...params, fts }) as KeywordHit[];
+  }
 
-    const scored = rows
-      .map((r) => {
-        const relevance = -r.rank; // bm25 is negative; more negative = better
-        const projectBoost = project && r.project === project ? 1.5 : r.project === null ? 1.2 : 1.0;
-        const importanceBoost = 0.6 + 0.2 * r.importance;
-        const ageDays = (now - r.updated_at) / DAY_MS;
-        const recencyBoost = 0.6 + 0.4 * Math.pow(0.5, ageDays / RECENCY_HALF_LIFE_DAYS);
-        return { r, score: relevance * projectBoost * importanceBoost * recencyBoost };
-      })
-      .sort((a, b) => b.score - a.score)
-      .slice(0, limit);
+  /**
+   * Exhaustive cosine scan over id + vector only (whole rows are loaded for the best candidates).
+   * Measured at about 6 ms per 1,000 memories, so no ANN index is needed at personal scale.
+   */
+  private semanticHits(q: SemanticQuery, where: string[], params: Params): SemanticHit[] {
+    const scored = (
+      this.db
+        .prepare(
+          `SELECT m.id, v.vector FROM memory_vectors v JOIN memories m ON m.id = v.memory_id
+           WHERE v.model = $model AND v.content_hash = m.content_hash AND ${where.join(" AND ")}`,
+        )
+        .all({ ...params, model: q.model }) as { id: number; vector: Uint8Array }[]
+    )
+      .map(({ id, vector }) => ({ id, similarity: dot(q.vector, fromBlob(vector)) }))
+      .filter((h) => h.similarity >= q.minSimilarity)
+      .sort((a, b) => b.similarity - a.similarity)
+      .slice(0, CANDIDATES);
+    const rows = new Map(
+      (
+        this.db
+          .prepare("SELECT * FROM memories WHERE id IN (SELECT value FROM json_each(?))")
+          .all(JSON.stringify(scored.map((h) => h.id))) as Row[]
+      ).map((r) => [r.id, r]),
+    );
+    return scored.map((h) => ({ row: rows.get(h.id)!, similarity: h.similarity }));
+  }
 
-    this.touch(scored.map((s) => s.r.id), now);
-    return scored.map((s) => toMemory(s.r, s.score));
+  /** Memories without a current vector for `model` (new, edited, or embedded by another model), most recent first. */
+  staleEmbeddings(model: string, limit: number): { id: number; hash: string; text: string }[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT m.id, m.content_hash, m.title, m.body FROM memories m
+           LEFT JOIN memory_vectors v ON v.memory_id = m.id AND v.model = $model AND v.content_hash = m.content_hash
+           WHERE m.deleted_at IS NULL AND v.memory_id IS NULL
+           ORDER BY m.updated_at DESC LIMIT $limit`,
+        )
+        .all({ model, limit }) as Pick<Row, "id" | "content_hash" | "title" | "body">[]
+    ).map((r) => ({ id: r.id, hash: r.content_hash, text: embeddingText(r) }));
+  }
+
+  /**
+   * Store vectors computed for `staleEmbeddings()` rows. `hash` is the content they were computed from, so a memory
+   * edited meanwhile stays stale. Returns how many were saved (memories deleted meanwhile are skipped).
+   */
+  saveEmbeddings(model: string, items: { id: number; hash: string; vector: Float32Array }[]): number {
+    const upsert = this.db.prepare(
+      `INSERT INTO memory_vectors (memory_id, model, content_hash, vector)
+       SELECT $id, $model, $hash, $vector WHERE EXISTS (SELECT 1 FROM memories WHERE id = $id)
+       ON CONFLICT (memory_id) DO UPDATE SET model = excluded.model, content_hash = excluded.content_hash, vector = excluded.vector`,
+    );
+    return this.write(() =>
+      items.reduce((n, { id, hash, vector }) => n + Number(upsert.run({ id, model, hash, vector: toBlob(vector) }).changes), 0),
+    );
+  }
+
+  /** Drop stored vectors so the next sync re-embeds everything. */
+  clearEmbeddings() {
+    this.write(() => this.db.exec("DELETE FROM memory_vectors"));
+  }
+
+  /** Live memories in the same scope (its project + global) whose current vector is close to memory `id`'s. */
+  similarTo(id: number, model: string, minSimilarity: number, limit = 3): Memory[] {
+    const self = this.db
+      .prepare(
+        `SELECT m.project, v.vector FROM memories m JOIN memory_vectors v ON v.memory_id = m.id
+         WHERE m.id = ? AND v.model = ? AND v.content_hash = m.content_hash`,
+      )
+      .get(id, model) as { project: string | null; vector: Uint8Array } | undefined;
+    if (!self) return [];
+    const where = ["m.deleted_at IS NULL", "m.superseded_by IS NULL", "m.id != $id"];
+    where.push(self.project === null ? "m.project IS NULL" : "(m.project = $project OR m.project IS NULL)");
+    return this.semanticHits(
+      { model, vector: fromBlob(self.vector), minSimilarity },
+      where,
+      self.project === null ? { id } : { id, project: self.project },
+    )
+      .slice(0, limit)
+      .map((h) => toMemory(h.row, h.similarity));
+  }
+
+  /** How many live memories have a current vector for `model`. */
+  embeddingCoverage(model: string): { embedded: number; total: number } {
+    const { embedded, total } = this.db
+      .prepare(
+        `SELECT count(v.memory_id) AS embedded, count(*) AS total FROM memories m
+         LEFT JOIN memory_vectors v ON v.memory_id = m.id AND v.model = ? AND v.content_hash = m.content_hash
+         WHERE m.deleted_at IS NULL AND m.superseded_by IS NULL`,
+      )
+      .get(model) as { embedded: number; total: number };
+    return { embedded, total };
   }
 
   list(input: ListInput = {}): Memory[] {
@@ -404,4 +446,3 @@ export class MemoryStore {
   }
 }
 
-export type { Row as MemoryRow };
